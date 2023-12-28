@@ -4,7 +4,8 @@ import os
 import logging
 import jsonpickle
 import tqdm
-from scholarly import scholarly
+from scholarly import scholarly, ProxyGenerator
+
 from .util import clean_filename
 
 __author__ = 'Pedro Sequeira'
@@ -25,14 +26,22 @@ if __name__ == '__main__':
                              'https://scholar.google.com/citations?user=')
     parser.add_argument('-o', '--output', type=str, default=OUTPUT_DIR,
                         help='The path to the directory in which to save data.')
+    
+    parser.add_argument('-p', '--proxy', type=bool, default=True, action='store_true', 
+                        help='If use proxy (suppored by free-proxy) to avoid being blocked by Google Scholar.')
     args = parser.parse_args()
+
+    pg = ProxyGenerator()
+    success = pg.FreeProxies()
+    scholarly.use_proxy(pg)
 
     # output
     os.makedirs(args.output, exist_ok=True)
     logging.RootLogger.root.handlers = []
     handlers = [logging.FileHandler(os.path.join(args.output, '../scholar.log'), 'w', encoding='utf-8'),
                 logging.StreamHandler()]
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s', datefmt='%H:%M:%S',
+    # add the line number to the log format
+    logging.basicConfig(level=logging.INFO, format='[%(pathname)s:%(lineno)d] %(asctime)s [%(levelname)s] %(message)s', datefmt='%H:%M:%S',
                         handlers=handlers)
 
     # get author data
@@ -44,7 +53,6 @@ if __name__ == '__main__':
     else:
         logging.info(f'Getting info for author id: "{args.id}"...')
         search_query = scholarly.search_author_id(args.id)
-        # search_query = scholarly.search_args.id(args.id)
         author = scholarly.fill(search_query)
         with open(author_file, 'w') as fp:
             fp.write(jsonpickle.dumps(author, indent=4))
@@ -109,7 +117,6 @@ if __name__ == '__main__':
                         logging.info(f'Author "{name}" does not have a Google Scholar profile')
                     else:
                         logging.info(f'Getting info for citing author "{name}"...')
-                        # search_query = scholarly.search_args.id(args.id)
                         search_query = scholarly.search_author_id(args.id)
                         authors[args.id] = search_query
 

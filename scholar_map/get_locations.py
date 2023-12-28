@@ -1,8 +1,12 @@
 import argparse
+import concurrent.futures
+import pdb
+from collections import defaultdict
 import csv
 import logging
 import os.path
 import re
+import time
 import email2country
 import jsonpickle
 import tqdm
@@ -11,10 +15,11 @@ import socket
 import pandas as pd
 from ipaddress import ip_network, ip_address
 from geopy import Nominatim
+from geopy.exc import GeocoderTimedOut
 from geotext import GeoText
 from requests.exceptions import SSLError
-from get_scholar import AUTHORS_FILE, OUTPUT_DIR
-from util import get_title
+from .get_scholar import AUTHORS_FILE, OUTPUT_DIR
+from .util import get_title
 
 __author__ = 'Pedro Sequeira'
 __email__ = 'pedrodbs@gmail.com'
@@ -116,12 +121,33 @@ def _search_world_unis(domain):
             return uni
 
         # otherwise return the info we have
-        loc = _get_geo_location(uni['name'], uni['state-province'], uni['country'])  # try geo-location
-        affiliation = uni['name']
-        uni = dict(domain=domain, name=affiliation, country=uni['country'], state=uni['state-province'], **loc)
-        _register_domain(domain, uni, affiliation)
-        return uni
-
+        # with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        #     # if wait too long, raise error
+        #     future = executor.submit(_get_geo_location, uni['name'], uni['state-province'], uni['country'])
+        #     try:
+        #         loc = future.result(timeout=5)
+        #     except TimeoutError:
+        #         affiliation = uni['name']
+        #         logging.info(f'Timeout getting geo-location for "{affiliation}"')
+        #         loc = {}
+        #     try:
+        #         uni = dict(domain=domain, name=uni['name'], country=uni['country'], state=uni['state-province'], **loc)
+        #         affiliation = uni['name']
+        #         _register_domain(domain, uni, affiliation)
+        #         return uni
+        #     except Exception as err:
+        #         logging.info(f'Error: {err}')
+        #         return None
+            
+        try:
+            loc = _get_geo_location(uni['name'], uni['state-province'], uni['country'])  # try geo-location
+            affiliation = uni['name']
+            uni = dict(domain=domain, name=affiliation, country=uni['country'], state=uni['state-province'], **loc)
+            _register_domain(domain, uni, affiliation)
+            return uni
+        except Exception as err:
+            logging.info(f'Error: {err}')
+            
     return None  # no luck
 
 
@@ -163,12 +189,33 @@ def _get_cache(domain, affiliation):
 
 
 def _get_geo_location(affiliation, city, country):
-    location = geo_locator.geocode(', '.join(f for f in [affiliation, city, country] if f is not None))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        # if wait too long, raise error
+        inputs = ', '.join(f for f in [affiliation, city, country] if f is not None)
+        future = executor.submit(geo_locator.geocode, inputs)
+        try:
+            location = future.result(timeout=10)
+        except Exception as err:
+            logging.info(f'Timeout getting geo-location for "{inputs}"')
+            location = None
+
+    # location = geo_locator.geocode(', '.join(f for f in [affiliation, city, country] if f is not None), timeout=10)
     if location is None:
         return _get_geo_location(None, city, country) if affiliation is not None else \
             _get_geo_location(None, None, country) if city is not None else {}
     loc_country = location.address.split(', ')[-1].lower()
-    geo_country = geo_locator.geocode(country).address.split(', ')[-1].lower()
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
+        # if wait too long, raise error
+        future = executor.submit(geo_locator.geocode, country)
+        try:
+            geo_country = future.result(timeout=10)
+            geo_country = geo_country.address.split(', ')[-1].lower()
+        except Exception as err:
+            logging.info(f'Timeout getting geo-location for "{country}"')
+            geo_country = None
+
+    # geo_country = geo_locator.geocode(country).address.split(', ')[-1].lower()
     if loc_country != geo_country:
         return _get_geo_location(None, city, country)  # can't trust affiliation, use only location
     return dict(latitude=location.latitude, longitude=location.longitude, address=location.address)
@@ -185,7 +232,7 @@ def _search_author_affiliation():
             country = email2country.email2institution_country(domain)
             if country is not None:
                 country = country.lower()
-        except SSLError:
+        except:
             country = None
     affiliation = _process_affiliation()
 
@@ -219,7 +266,6 @@ def _search_author_affiliation():
     _register_domain(full_domain, uni, affiliation)
     return uni
 
-
 if __name__ == '__main__':
 
     parser = argparse.ArgumentParser()
@@ -230,7 +276,7 @@ if __name__ == '__main__':
     logging.RootLogger.root.handlers = []
     handlers = [logging.FileHandler(os.path.join(args.output, 'locations.log'), 'w', encoding='utf-8'),
                 logging.StreamHandler()]
-    logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s', datefmt='%H:%M:%S',
+    logging.basicConfig(level=logging.INFO, format='[%(pathname)s:%(lineno)d] %(asctime)s [%(levelname)s] %(message)s', datefmt='%H:%M:%S',
                         handlers=handlers)
 
     # load authors file
@@ -273,8 +319,8 @@ if __name__ == '__main__':
 
     logging.info('==================================================')
     logging.info('Taking affiliation and location information from each author...')
-    domain_unis = {}
-    domain_affiliations = {}
+    domain_unis = defaultdict(list)
+    domain_affiliations = defaultdict(list)
     found = total = 0
     for author in tqdm.tqdm(authors.values()):
         name = author['name']
@@ -282,7 +328,7 @@ if __name__ == '__main__':
         if 'affiliation' not in author or 'email_domain' not in author:
             logging.info(f'No Google Scholar data found for {name}...')
             continue
-
+        
         uni_data = _search_author_affiliation()
         if uni_data is None:
             logging.info(f'Could not find info for author "{author}"!')
